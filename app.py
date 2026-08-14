@@ -17,8 +17,7 @@ DB_PASS = "ecbf7b24620d811af77b"
 CLIENT_ID = "37481"
 CLIENT_SECRET = "bc48a48983cf73fa139c1039699cd09c2176e64a14f55e3d"
 REDIRECT_URI = "https://187-77-57-53.sslip.io/callback"
-SCOPES = "read_content,read_products,read_coupons,read_customers,read_orders,read_shipping,read_discounts,read_draft_orders,read_locations,read_fulfillment_orders,read_logistic,read_orders_risk,read_storecredit,read_giftcard"
-
+SCOPES = "read_content,read_products,read_orders,read_customers"
 def get_connection():
     return psycopg2.connect(
         host=DB_HOST,
