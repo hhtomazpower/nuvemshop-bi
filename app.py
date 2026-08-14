@@ -27,7 +27,14 @@ def get_connection():
         user=DB_USER,
         password=DB_PASS
     )
-
+@app.route("/")
+def health():
+    try:
+        conn = get_connection()
+        conn.close()
+        return jsonify({"status": "ok", "db": "connected"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "db": str(e)}), 500
 @app.route("/install")
 def install():
     auth_url = (
