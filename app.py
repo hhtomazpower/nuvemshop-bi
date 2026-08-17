@@ -1,179 +1,547 @@
 import os
-import logging
-from flask import Flask, request, redirect, jsonify
-import psycopg2
-import psycopg2.extras
+import json
 import requests
 from datetime import datetime
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from flask import Flask, jsonify, request
+import psycopg2
 
 app = Flask(__name__)
 
-DB_HOST = os.getenv("DB_HOST", "apto_n8n_postgres")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "nuvemshop_bi")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASS = os.getenv("DB_PASSWORD", "")
+# 
+# CONFIG
+# 
+DB_CONFIG = {
+    'host': os.environ.get('DB_HOST'),
+    'port': os.environ.get('DB_PORT', '5432'),
+    'dbname': os.environ.get('DB_NAME', 'nuvemshop_bi'),
+    'user': os.environ.get('DB_USER'),
+    'password': os.environ.get('DB_PASSWORD'),
+}
 
-CLIENT_ID = os.getenv("CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "")
+CLIENT_ID = os.environ.get('CLIENT_ID')
+CLIENT_SECRET = os.environ.get('CLIENT_SECRET')
+NUVEMSHOP_API_BASE = 'https://api.tiendanube.com/v1'
 
-SCOPES = "read_content,read_products,read_orders,read_customers,read_coupons"
+# 
+# DB CONNECTION
+# 
+def get_db_connection():
+    return psycopg2.connect(**DB_CONFIG)
 
-def get_connection():
-    return psycopg2.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS
+def get_active_store_token(store_id):
+    """Busca o access_token da loja conectada."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT access_token FROM connected_stores WHERE store_id = %s AND is_active = TRUE",
+        (str(store_id),)
     )
+    result = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not result:
+        raise ValueError(f"Loja {store_id} não encontrada ou inativa")
+    return result[0]
 
-def init_db():
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS connected_stores (
-                id SERIAL PRIMARY KEY,
-                store_id VARCHAR(50) UNIQUE NOT NULL,
-                access_token TEXT NOT NULL,
-                scope TEXT,
-                store_name VARCHAR(255),
-                brand_name VARCHAR(255),
-                status VARCHAR(20) DEFAULT 'active',
-                authorized_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_sync_at TIMESTAMP
-            )
-        """)
-        conn.commit()
-        conn.close()
-        logger.info("Tabela connected_stores verificada/criada")
-    except Exception as e:
-        logger.error("Erro ao criar tabela: %s", e)
-
-init_db()
-
-@app.route("/")
-def health():
-    try:
-        conn = get_connection()
-        conn.close()
-        return jsonify({"status": "ok", "db": "connected"}), 200
-    except Exception as e:
-        logger.error("Health check falhou: %s", e)
-        return jsonify({"status": "error", "db": str(e)}), 500
-
-@app.route("/install")
-def install():
-    import secrets
-    state = secrets.token_urlsafe(16)
-    auth_url = "https://www.nuvemshop.com.br/apps/{}/authorize?state={}".format(CLIENT_ID, state)
-    return redirect(auth_url)
-
-@app.route("/callback")
-def callback():
-    code = request.args.get("code")
-    if not code:
-        return "Codigo de autorizacao nao encontrado", 400
-
-    token_url = "https://www.nuvemshop.com.br/apps/authorize/token"
-    payload = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "code": code,
-        "grant_type": "authorization_code",
+def make_api_headers(access_token):
+    """Monta headers com o token real da loja."""
+    return {
+        'Authentication': f'bearer {access_token}',
+        'User-Agent': 'modapower2-bi (contato@ontrade.com.br)',
+        'Content-Type': 'application/json'
     }
 
-    try:
-        resp = requests.post(token_url, json=payload, timeout=30)
+# 
+# SYNC: CATEGORIES
+# 
+def sync_categories(store_id, access_token):
+    headers = make_api_headers(access_token)
+    url = f"{NUVEMSHOP_API_BASE}/{store_id}/categories"
+    all_categories = []
+    page = 1
+
+    while True:
+        params = {'page': page, 'per_page': 100}
+        resp = requests.get(url, headers=headers, params=params)
         if resp.status_code != 200:
-            logger.error("Erro ao obter token: %s - %s", resp.status_code, resp.text)
-            return "Erro ao obter token: " + str(resp.text), 500
+            app.logger.error(f"Erro ao buscar categorias (página {page}): {resp.status_code} - {resp.text}")
+            break
 
-        token_data = resp.json()
-        access_token = token_data.get("access_token")
-        store_id = str(token_data.get("user_id", ""))
-        scope = token_data.get("scope", "")
+        data = resp.json()
+        if not data:
+            break
 
-        logger.info("Token obtido para store_id: %s", store_id)
+        all_categories.extend(data)
+        page += 1
 
-        store_name = ""
-        brand_name = ""
-        try:
-            store_resp = requests.get(
-                "https://api.nuvemshop.com.br/2025-03/{}/store".format(store_id),
-                headers={
-                    "Authorization": "Bearer {}".format(access_token),
-                    "User-Agent": "nuvemshop-bi (humberto.tomaz@ontrade.com.br)"
-                },
-                timeout=30
-            )
-            if store_resp.status_code == 200:
-                store_info = store_resp.json()
-                name = store_info.get("name", "")
-                if isinstance(name, dict):
-                    store_name = name.get("pt", "") or name.get("es", "") or list(name.values())[0]
-                else:
-                    store_name = name
-                brand = store_info.get("brand", "")
-                if isinstance(brand, dict):
-                    brand_name = brand.get("name", "")
-                else:
-                    brand_name = brand
-            else:
-                logger.warning("API store retornou %s: %s", store_resp.status_code, store_resp.text)
-        except Exception as e:
-            logger.warning("Não foi possível obter info da loja: %s", e)
-        
+    conn = get_db_connection()
+    cur = conn.cursor()
+    now = datetime.now()
 
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO connected_stores (store_id, access_token, scope, store_name, brand_name, authorized_at, status) "
-            "VALUES (%s, %s, %s, %s, %s, %s, 'active') "
-            "ON CONFLICT (store_id) DO UPDATE SET "
-            "access_token = EXCLUDED.access_token, scope = EXCLUDED.scope, "
-            "store_name = EXCLUDED.store_name, brand_name = EXCLUDED.brand_name, "
-            "authorized_at = EXCLUDED.authorized_at, status = 'active'",
-            (store_id, access_token, scope, store_name, brand_name, datetime.now())
-        )
-        conn.commit()
-        conn.close()
+    for cat in all_categories:
+        name_data = cat.get('name', {})
+        desc_data = cat.get('description', {})
+        cur.execute("""
+            INSERT INTO categories (
+                store_id, nuvemshop_id, name_pt, name_es, name_en,
+                parent_category_id, description, handle,
+                is_visible, product_count, subcategories_count,
+                created_at_api, updated_at_api, synced_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (store_id, nuvemshop_id) DO UPDATE SET
+                name_pt = EXCLUDED.name_pt,
+                name_es = EXCLUDED.name_es,
+                name_en = EXCLUDED.name_en,
+                parent_category_id = EXCLUDED.parent_category_id,
+                description = EXCLUDED.description,
+                is_visible = EXCLUDED.is_visible,
+                product_count = EXCLUDED.product_count,
+                updated_at_api = EXCLUDED.updated_at_api,
+                synced_at = EXCLUDED.synced_at
+        """, (
+            str(store_id), cat.get('id'),
+            name_data.get('pt') if isinstance(name_data, dict) else str(name_data),
+            name_data.get('es') if isinstance(name_data, dict) else None,
+            name_data.get('en') if isinstance(name_data, dict) else None,
+            cat.get('parent_category_id'),
+            desc_data.get('pt') if isinstance(desc_data, dict) else str(desc_data) if desc_data else None,
+            cat.get('handle'),
+            cat.get('visible', True),
+            cat.get('product_count', 0),
+            cat.get('subcategories_count', 0),
+            cat.get('created_at'),
+            cat.get('updated_at'),
+            now
+        ))
 
-        return jsonify({"status": "success", "store_id": store_id, "store_name": store_name})
-    except requests.exceptions.Timeout:
-        logger.error("Timeout ao contactar Nuvemshop")
-        return "Timeout ao obter token", 504
-    except Exception as e:
-        logger.error("Erro no callback: %s", e)
-        return "Erro interno: " + str(e), 500
+    cur.execute("UPDATE connected_stores SET last_synced_at = %s WHERE store_id = %s", (now, str(store_id)))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return len(all_categories)
 
-@app.route("/api/stores")
-def list_stores():
+# 
+# SYNC: PRODUCTS
+# 
+def sync_products(store_id, access_token):
+    headers = make_api_headers(access_token)
+    url = f"{NUVEMSHOP_API_BASE}/{store_id}/products"
+    all_products = []
+    page = 1
+
+    while True:
+        params = {'page': page, 'per_page': 100}
+        resp = requests.get(url, headers=headers, params=params)
+        if resp.status_code != 200:
+            app.logger.error(f"Erro ao buscar produtos (página {page}): {resp.status_code} - {resp.text}")
+            break
+
+        data = resp.json()
+        if not data:
+            break
+
+        all_products.extend(data)
+        page += 1
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    now = datetime.now()
+
+    for prod in all_products:
+        name_data = prod.get('name', {})
+        desc_data = prod.get('description', {})
+        price_data = prod.get('price', 0) or 0
+        compare_price = prod.get('compare_at_price', 0) or 0
+        cost_price = prod.get('cost', 0) or 0
+        images = prod.get('images', [])
+        skus = prod.get('skus', [])
+        categories = prod.get('categories', [])
+
+        cur.execute("""
+            INSERT INTO products (
+                store_id, nuvemshop_id, name_pt, name_es, name_en,
+                slug, description, brand, variant_count,
+                category_id, category_name,
+                price, compare_at_price, cost_price,
+                weight, weight_unit, width, height, depth,
+                sku, stock, stock_management,
+                is_published, requires_shipping,
+                images_count, thumbnail_url,
+                created_at_api, updated_at_api, synced_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (store_id, nuvemshop_id) DO UPDATE SET
+                name_pt = EXCLUDED.name_pt,
+                name_es = EXCLUDED.name_es,
+                name_en = EXCLUDED.name_en,
+                slug = EXCLUDED.slug,
+                description = EXCLUDED.description,
+                brand = EXCLUDED.brand,
+                price = EXCLUDED.price,
+                compare_at_price = EXCLUDED.compare_at_price,
+                cost_price = EXCLUDED.cost_price,
+                stock = EXCLUDED.stock,
+                stock_management = EXCLUDED.stock_management,
+                is_published = EXCLUDED.is_published,
+                images_count = EXCLUDED.images_count,
+                thumbnail_url = EXCLUDED.thumbnail_url,
+                updated_at_api = EXCLUDED.updated_at_api,
+                synced_at = EXCLUDED.synced_at
+        """, (
+            str(store_id), prod.get('id'),
+            name_data.get('pt') if isinstance(name_data, dict) else str(name_data),
+            name_data.get('es') if isinstance(name_data, dict) else None,
+            name_data.get('en') if isinstance(name_data, dict) else None,
+            prod.get('handle', {}).get('pt') if isinstance(prod.get('handle'), dict) else prod.get('handle'),
+            desc_data.get('pt') if isinstance(desc_data, dict) else (str(desc_data) if desc_data else None),
+            prod.get('brand'),
+            len(prod.get('variants', [])),
+            categories[0] if categories else None,
+            None,
+            float(price_data) / 100 if price_data else 0,
+            float(compare_price) / 100 if compare_price else 0,
+            float(cost_price) / 100 if cost_price else 0,
+            prod.get('weight', 0),
+            prod.get('weight_unit', 'g'),
+            prod.get('width', 0),
+            prod.get('height', 0),
+            prod.get('depth', 0),
+            skus[0] if skus else None,
+            prod.get('stock', 0),
+            prod.get('stock_management', False),
+            prod.get('published', True),
+            prod.get('requires_shipping', True),
+            len(images),
+            images[0].get('src') if images else None,
+            prod.get('created_at'),
+            prod.get('updated_at'),
+            now
+        ))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return len(all_products)
+
+# 
+# SYNC: CUSTOMERS
+# 
+def sync_customers(store_id, access_token):
+    headers = make_api_headers(access_token)
+    url = f"{NUVEMSHOP_API_BASE}/{store_id}/customers"
+    all_customers = []
+    page = 1
+
+    while True:
+        params = {'page': page, 'per_page': 100}
+        resp = requests.get(url, headers=headers, params=params)
+        if resp.status_code != 200:
+            app.logger.error(f"Erro ao buscar clientes (página {page}): {resp.status_code} - {resp.text}")
+            break
+
+        data = resp.json()
+        if not data:
+            break
+
+        all_customers.extend(data)
+        page += 1
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    now = datetime.now()
+
+    for cust in all_customers:
+        ident = cust.get('identification', {})
+        cur.execute("""
+            INSERT INTO customers (
+                store_id, nuvemshop_id, name, email, phone,
+                document, identification_type, note,
+                default_address, addresses,
+                total_spent, total_orders,
+                is_newsletter_subscribed, accepts_marketing,
+                tags, created_at_api, updated_at_api, synced_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (store_id, nuvemshop_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                email = EXCLUDED.email,
+                phone = EXCLUDED.phone,
+                document = EXCLUDED.document,
+                total_spent = EXCLUDED.total_spent,
+                total_orders = EXCLUDED.total_orders,
+                updated_at_api = EXCLUDED.updated_at_api,
+                synced_at = EXCLUDED.synced_at
+        """, (
+            str(store_id), cust.get('id'),
+            f"{cust.get('first_name', '')} {cust.get('last_name', '')}".strip(),
+            cust.get('email'),
+            cust.get('phone'),
+            ident.get('number') if isinstance(ident, dict) else None,
+            ident.get('type') if isinstance(ident, dict) else None,
+            cust.get('note'),
+            json.dumps(cust.get('default_address')) if cust.get('default_address') else None,
+            json.dumps(cust.get('addresses')) if cust.get('addresses') else None,
+            float(cust.get('total_spent', 0)) / 100 if cust.get('total_spent') else 0,
+            cust.get('total_orders', 0),
+            cust.get('newsletter_subscription', False),
+            cust.get('accepts_marketing', False),
+            cust.get('tags', []),
+            cust.get('created_at'),
+            cust.get('updated_at'),
+            now
+        ))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return len(all_customers)
+
+# 
+# SYNC: ORDERS + ORDER_ITEMS
+# 
+def sync_orders(store_id, access_token):
+    headers = make_api_headers(access_token)
+    url = f"{NUVEMSHOP_API_BASE}/{store_id}/orders"
+    all_orders = []
+    page = 1
+
+    while True:
+        params = {'page': page, 'per_page': 50}
+        resp = requests.get(url, headers=headers, params=params)
+        if resp.status_code != 200:
+            app.logger.error(f"Erro ao buscar pedidos (página {page}): {resp.status_code} - {resp.text}")
+            break
+
+        data = resp.json()
+        if not data:
+            break
+
+        all_orders.extend(data)
+        page += 1
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    now = datetime.now()
+
+    for ord_data in all_orders:
+        customer = ord_data.get('customer', {}) if isinstance(ord_data.get('customer'), dict) else {}
+        payment = ord_data.get('payment_method', {})
+
+        cur.execute("""
+            INSERT INTO orders (
+                store_id, nuvemshop_id, order_number, status,
+                financial_status, fulfillment_status,
+                customer_id, customer_name, customer_email,
+                customer_phone, customer_document,
+                subtotal, discount, shipping_cost, taxes, total,
+                total_weight, currency, language,
+                payment_method, payment_status_detail,
+                shipping_method_name, shipping_address, billing_address,
+                note, tags, cancelled_at, closed_at,
+                created_at_api, updated_at_api, synced_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (store_id, nuvemshop_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                financial_status = EXCLUDED.financial_status,
+                fulfillment_status = EXCLUDED.fulfillment_status,
+                customer_name = EXCLUDED.customer_name,
+                subtotal = EXCLUDED.subtotal,
+                discount = EXCLUDED.discount,
+                shipping_cost = EXCLUDED.shipping_cost,
+                total = EXCLUDED.total,
+                payment_method = EXCLUDED.payment_method,
+                updated_at_api = EXCLUDED.updated_at_api,
+                synced_at = EXCLUDED.synced_at
+            RETURNING id
+        """, (
+            str(store_id), ord_data.get('id'), ord_data.get('number'),
+            ord_data.get('status'),
+            ord_data.get('payment_status'),
+            ord_data.get('shipping_status'),
+            customer.get('id'),
+            f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip(),
+            customer.get('email'),
+            customer.get('phone'),
+            customer.get('identification', {}).get('number') if isinstance(customer.get('identification'), dict) else None,
+            float(ord_data.get('subtotal', 0)) / 100 if ord_data.get('subtotal') else 0,
+            float(ord_data.get('discount', 0)) / 100 if ord_data.get('discount') else 0,
+            float(ord_data.get('shipping_cost', 0)) / 100 if ord_data.get('shipping_cost') else 0,
+            float(ord_data.get('tax', 0)) / 100 if ord_data.get('tax') else 0,
+            float(ord_data.get('total', 0)) / 100 if ord_data.get('total') else 0,
+            ord_data.get('total_weight', 0),
+            ord_data.get('currency', 'BRL'),
+            ord_data.get('language', 'pt'),
+            payment.get('name') if isinstance(payment, dict) else str(ord_data.get('payment_method', '')),
+            None,
+            ord_data.get('shipping_method_name'),
+            json.dumps(ord_data.get('shipping_address')) if ord_data.get('shipping_address') else None,
+            json.dumps(ord_data.get('billing_address')) if ord_data.get('billing_address') else None,
+            ord_data.get('note'),
+            ord_data.get('tags', []),
+            ord_data.get('cancelled_at'),
+            ord_data.get('closed_at'),
+            ord_data.get('created_at'),
+            ord_data.get('updated_at'),
+            now
+        ))
+
+        order_db_id = cur.fetchone()[0]
+
+        for item in ord_data.get('products', []):
+            item_name = item.get('name', {})
+            item_price = item.get('price', 0) or 0
+            qty = int(item.get('quantity', 1))
+            cur.execute("""
+                INSERT INTO order_items (
+                    store_id, order_id, nuvemshop_order_id,
+                    product_id, product_name, variant_id,
+                    variant_values, sku, quantity,
+                    unit_price, total_price, weight, weight_unit, synced_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (nuvemshop_order_id, product_id, variant_id) DO UPDATE SET
+                    quantity = EXCLUDED.quantity,
+                    unit_price = EXCLUDED.unit_price,
+                    total_price = EXCLUDED.total_price,
+                    synced_at = EXCLUDED.synced_at
+            """, (
+                str(store_id), order_db_id, ord_data.get('id'),
+                item.get('product_id'),
+                item_name.get('pt') if isinstance(item_name, dict) else str(item_name),
+                item.get('variant_id'),
+                json.dumps(item.get('variant_values')) if item.get('variant_values') else None,
+                item.get('sku'),
+                qty,
+                float(item_price) / 100 if item_price else 0,
+                (float(item_price) / 100 * qty) if item_price else 0,
+                item.get('weight', 0),
+                item.get('weight_unit', 'g'),
+                now
+            ))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return len(all_orders)
+
+# 
+# ENDPOINT: SYNC ALL
+# 
+@app.route('/api/sync/<store_id>', methods=['POST'])
+def sync_all(store_id):
+    """Sincroniza todos os dados da loja: categorias, produtos, clientes, pedidos."""
     try:
-        conn = get_connection()
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute(
-            "SELECT store_id, store_name, brand_name, scope, status, authorized_at, last_sync_at "
-            "FROM connected_stores ORDER BY authorized_at DESC"
-        )
-        rows = cursor.fetchall()
-        conn.close()
-        result = []
-        for row in rows:
-            row_dict = dict(row)
-            for key, value in row_dict.items():
-                if isinstance(value, datetime):
-                    row_dict[key] = value.isoformat()
-            result.append(row_dict)
-        return jsonify(result)
-    except Exception as e:
-        logger.error("Erro ao listar lojas: %s", e)
-        return jsonify({"error": str(e)}), 500
+        access_token = get_active_store_token(store_id)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    results = {}
+    errors = []
+
+    try:
+        results['categories'] = sync_categories(store_id, access_token)
+    except Exception as e:
+        errors.append(f'categories: {str(e)}')
+        results['categories'] = 0
+
+    try:
+        results['products'] = sync_products(store_id, access_token)
+    except Exception as e:
+        errors.append(f'products: {str(e)}')
+        results['products'] = 0
+
+    try:
+        results['customers'] = sync_customers(store_id, access_token)
+    except Exception as e:
+        errors.append(f'customers: {str(e)}')
+        results['customers'] = 0
+
+    try:
+        results['orders'] = sync_orders(store_id, access_token)
+    except Exception as e:
+        errors.append(f'orders: {str(e)}')
+        results['orders'] = 0
+
+    return jsonify({
+        'store_id': store_id,
+        'synced': results,
+        'errors': errors,
+        'timestamp': datetime.now().isoformat()
+    })
+
+# 
+# ENDPOINT: SYNC por entidade
+# 
+@app.route('/api/sync/<store_id>/<entity>', methods=['POST'])
+def sync_entity(store_id, entity):
+    try:
+        access_token = get_active_store_token(store_id)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
+
+    sync_map = {
+        'categories': sync_categories,
+        'products': sync_products,
+        'customers': sync_customers,
+        'orders': sync_orders
+    }
+
+    if entity not in sync_map:
+        return jsonify({'error': f'Entidade inválida. Use: {list(sync_map.keys())}'}), 400
+
+    try:
+        count = sync_map[entity](store_id, access_token)
+        return jsonify({
+            'store_id': store_id,
+            'entity': entity,
+            'synced_count': count,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# 
+# HEALTH CHECK
+# 
+@app.route('/')
+def health_check():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+        conn.close()
+        return jsonify({'db': 'connected', 'status': 'ok'})
+    except Exception as e:
+        return jsonify({'db': 'error', 'status': 'fail', 'error': str(e)}), 500
+
+# 
+# DASHBOARD: Métricas
+# 
+@app.route('/api/dashboard/<store_id>', methods=['GET'])
+def dashboard(store_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    metrics = {}
+
+    cur.execute("SELECT COUNT(*) FROM products WHERE store_id = %s", (str(store_id),))
+    metrics['total_products'] = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM orders WHERE store_id = %s", (str(store_id),))
+    metrics['total_orders'] = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM customers WHERE store_id = %s", (str(store_id),))
+    metrics['total_customers'] = cur.fetchone()[0]
+
+    cur.execute("SELECT COALESCE(SUM(total), 0) FROM orders WHERE store_id = %s AND status != 'cancelled'", (str(store_id),))
+    metrics['total_revenue'] = float(cur.fetchone()[0])
+
+    cur.execute("SELECT COALESCE(AVG(total), 0) FROM orders WHERE store_id = %s AND status != 'cancelled'", (str(store_id),))
+    metrics['avg_order_value'] = float(cur.fetchone()[0])
+
+    cur.execute("SELECT COUNT(*) FROM order_items WHERE store_id = %s", (str(store_id),))
+    metrics['total_items_sold'] = cur.fetchone()[0]
+
+    cur.close()
+    conn.close()
+    return jsonify({'store_id': store_id, 'metrics': metrics})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000)
