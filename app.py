@@ -105,16 +105,22 @@ def callback():
         brand_name = ""
         try:
             store_resp = requests.get(
-                "https://api.nuvemshop.com.br/v1/{}".format(store_id),
-                headers={"Authentication": "bearer {}".format(access_token)},
+                "https://api.nuvemshop.com.br/2025-03/{}".format(store_id),
+                headers={
+                    "Authorization": "Bearer {}".format(access_token),
+                    "User-Agent": "nuvemshop-bi (humberto@powercorporate.com.br)"
+                },
                 timeout=30
             )
             if store_resp.status_code == 200:
                 store_info = store_resp.json()
-                store_name = store_info.get("name", "")
-                brand_name = store_info.get("brand", {}).get("name", "")
+                store_name = store_info.get("name", {}).get("pt", "") or store_info.get("name", "")
+                brand_name = store_info.get("brand", {}).get("name", "") if isinstance(store_info.get("brand"), dict) else ""
+            else:
+                logger.warning("API retornou %s: %s", store_resp.status_code, store_resp.text[:200])
         except Exception as e:
-            logger.warning("Nao foi possivel obter info da loja: %s", e)
+            logger.warning("Não foi possível obter info da loja: %s", e)
+        
 
         conn = get_connection()
         cursor = conn.cursor()
