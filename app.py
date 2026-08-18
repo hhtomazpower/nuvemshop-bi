@@ -310,6 +310,128 @@ def sync_products(store_id, access_token):
     cur.close()
     conn.close()
     return len(all_products)
+
+# 
+# SYNC: PRODUCT VARIANTS
+# 
+def sync_product_variants(store_id, access_token):
+    """Sincroniza variantes de todos os produtos já cadastrados."""
+    headers = make_api_headers(access_token)
+    url_base = f"{NUVEMSHOP_API_BASE}/{store_id}/products"
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    now = datetime.now()
+    
+    # Buscar todos os nuvemshop_id de produtos já sincronizados
+    cur.execute("SELECT nuvemshop_id FROM products WHERE store_id = %s", (str(store_id),))
+    product_ids = [row[0] for row in cur.fetchall()]
+    
+    total_variants = 0
+    
+    for prod_id in product_ids:
+        # Buscar o produto completo na API (com variants)
+        url = f"{url_base}/{prod_id}"
+        resp = requests.get(url, headers=headers)
+        
+        if resp.status_code != 200:
+            app.logger.error(f"Erro ao buscar produto {prod_id}: {resp.status_code}")
+            continue
+        
+        prod_data = resp.json()
+        variants = prod_data.get('variants', [])
+        
+        if not isinstance(variants, list):
+            variants = []
+        
+        for variant in variants:
+            variant_values = variant.get('values', [])
+            if not isinstance(variant_values, list):
+                variant_values = []
+            
+            # Extrair valores das variantes (tamanho, cor, etc)
+            clean_values = []
+            for val in variant_values:
+                if isinstance(val, dict):
+                    clean_values.append({
+                        'pt': val.get('pt'),
+                        'es': val.get('es'),
+                        'en': val.get('en')
+                    })
+                else:
+                    clean_values.append(str(val))
+            
+            price = variant.get('price', 0) or 0
+            compare_price = variant.get('compare_at_price', 0) or 0
+            cost = variant.get('cost', 0) or 0
+            
+            cur.execute("""
+                INSERT INTO product_variants (
+                    store_id, product_id, nuvemshop_variant_id,
+                    variant_values, sku, barcode,
+                    price, compare_at_price, cost_price,
+                    weight, weight_unit, stock, stock_management,
+                    position, is_default,
+                    created_at_api, updated_at_api, synced_at
+                ) VALUES (
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s
+                )
+                ON CONFLICT (store_id, nuvemshop_variant_id) DO UPDATE SET
+                    variant_values = EXCLUDED.variant_values,
+                    sku = EXCLUDED.sku,
+                    price = EXCLUDED.price,
+                    compare_at_price = EXCLUDED.compare_at_price,
+                    cost_price = EXCLUDED.cost_price,
+                    stock = EXCLUDED.stock,
+                    stock_management = EXCLUDED.stock_management,
+                    position = EXCLUDED.position,
+                    updated_at_api = EXCLUDED.updated_at_api,
+                    synced_at = EXCLUDED.synced_at
+            """, (
+                str(store_id),
+                prod_id,
+                safe_int(variant.get('id')),
+                json.dumps(clean_values) if clean_values else None,
+                safe_str(variant.get('sku')),
+                safe_str(variant.get('barcode')),
+                safe_float(price, 100),
+                safe_float(compare_price, 100),
+                safe_float(cost, 100),
+                safe_float(variant.get('weight', 0)),
+                safe_str(variant.get('weight_unit', 'g')),
+                safe_int(variant.get('stock', 0)),
+                safe_bool(variant.get('stock_management')),
+                safe_int(variant.get('position', 0)),
+                variant.get('default', False) if isinstance(variant.get('default'), bool) else False,
+                variant.get('created_at'),
+                variant.get('updated_at'),
+                now
+            ))
+            total_variants += 1
+        
+        # Atualizar o produto pai com preço/estoque agregados da primeira variante
+        if variants:
+            first_variant = variants[0]
+            v_price = safe_float(first_variant.get('price', 0), 100)
+            v_stock = sum(safe_int(v.get('stock', 0)) for v in variants if isinstance(v, dict))
+            v_sku = safe_str(first_variant.get('sku')) if first_variant.get('sku') else None
+            
+            cur.execute("""
+                UPDATE products 
+                SET price = %s, stock = %s, sku = %s
+                WHERE store_id = %s AND nuvemshop_id = %s
+            """, (v_price, v_stock, v_sku, str(store_id), prod_id))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    return total_variants
+
 # 
 # SYNC: CUSTOMERS
 # 
