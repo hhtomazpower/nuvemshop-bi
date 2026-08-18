@@ -139,10 +139,9 @@ def sync_categories(store_id, access_token):
     return len(all_categories)
 
 # 
-# SYNC: PRODUCTS (CORRIGIDO v2 - SANITIZAÇÃO COMPLETA)
+# SYNC: PRODUCTS (CORRIGIDO v3 - CONTAGEM DE %s CORRIGIDA)
 # 
 def safe_str(val):
-    """Converte qualquer valor para string segura. Se for dict, extrai 'pt' ou converte para JSON."""
     if val is None:
         return None
     if isinstance(val, dict):
@@ -152,7 +151,6 @@ def safe_str(val):
     return str(val)
 
 def safe_float(val, divide_by=1):
-    """Converte para float com segurança. Se for dict/list, extrai valor ou retorna 0."""
     if val is None:
         return 0
     if isinstance(val, (dict, list)):
@@ -163,7 +161,6 @@ def safe_float(val, divide_by=1):
         return 0
 
 def safe_int(val):
-    """Converte para int com segurança."""
     if val is None:
         return 0
     if isinstance(val, (dict, list)):
@@ -174,7 +171,6 @@ def safe_int(val):
         return 0
 
 def safe_bool(val):
-    """Converte para bool com segurança."""
     if val is None:
         return False
     if isinstance(val, bool):
@@ -210,7 +206,6 @@ def sync_products(store_id, access_token):
     now = datetime.now()
 
     for prod in all_products:
-        # Extrair campos multilíngues
         name_data = prod.get('name', {})
         name_pt = name_data.get('pt') if isinstance(name_data, dict) else safe_str(name_data)
         name_es = name_data.get('es') if isinstance(name_data, dict) else None
@@ -222,7 +217,6 @@ def sync_products(store_id, access_token):
         handle_data = prod.get('handle', {})
         slug = handle_data.get('pt') if isinstance(handle_data, dict) else safe_str(handle_data)
 
-        # Campos que podem vir como dict inesperadamente
         images = prod.get('images', [])
         if not isinstance(images, list):
             images = []
@@ -239,6 +233,7 @@ def sync_products(store_id, access_token):
         if not isinstance(variants, list):
             variants = []
 
+        # IMPORTANTE: 29 colunas = 29 %s
         cur.execute("""
             INSERT INTO products (
                 store_id, nuvemshop_id, name_pt, name_es, name_en,
@@ -250,7 +245,17 @@ def sync_products(store_id, access_token):
                 is_published, requires_shipping,
                 images_count, thumbnail_url,
                 created_at_api, updated_at_api, synced_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s,
+                %s, %s, %s,
+                %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s, %s
+            )
             ON CONFLICT (store_id, nuvemshop_id) DO UPDATE SET
                 name_pt = EXCLUDED.name_pt,
                 name_es = EXCLUDED.name_es,
@@ -269,33 +274,36 @@ def sync_products(store_id, access_token):
                 updated_at_api = EXCLUDED.updated_at_api,
                 synced_at = EXCLUDED.synced_at
         """, (
-            str(store_id),
-            safe_int(prod.get('id')),
-            name_pt, name_es, name_en,
-            slug,
-            description,
-            safe_str(prod.get('brand')),
-            len(variants),
-            categories[0] if categories and isinstance(categories[0], (int, float)) else None,
-            None,
-            safe_float(prod.get('price'), 100),
-            safe_float(prod.get('compare_at_price'), 100),
-            safe_float(prod.get('cost'), 100),
-            safe_float(prod.get('weight')),
-            safe_str(prod.get('weight_unit', 'g')),
-            safe_float(prod.get('width')),
-            safe_float(prod.get('height')),
-            safe_float(prod.get('depth')),
-            skus[0] if skus and isinstance(skus[0], str) else None,
-            safe_int(prod.get('stock')),
-            safe_bool(prod.get('stock_management')),
-            safe_bool(prod.get('published')),
-            safe_bool(prod.get('requires_shipping')),
-            len(images),
-            images[0].get('src') if images and isinstance(images[0], dict) else (safe_str(images[0]) if images else None),
-            prod.get('created_at'),
-            prod.get('updated_at'),
-            now
+            # 29 parâmetros — alinhados 1:1 com os %s acima
+            str(store_id),                          # 1  store_id
+            safe_int(prod.get('id')),               # 2  nuvemshop_id
+            name_pt,                                # 3  name_pt
+            name_es,                                # 4  name_es
+            name_en,                                # 5  name_en
+            slug,                                   # 6  slug
+            description,                            # 7  description
+            safe_str(prod.get('brand')),            # 8  brand
+            len(variants),                          # 9  variant_count
+            categories[0] if categories and isinstance(categories[0], (int, float)) else None,  # 10 category_id
+            None,                                   # 11 category_name
+            safe_float(prod.get('price'), 100),     # 12 price
+            safe_float(prod.get('compare_at_price'), 100),  # 13 compare_at_price
+            safe_float(prod.get('cost'), 100),      # 14 cost_price
+            safe_float(prod.get('weight')),          # 15 weight
+            safe_str(prod.get('weight_unit', 'g')),  # 16 weight_unit
+            safe_float(prod.get('width')),           # 17 width
+            safe_float(prod.get('height')),          # 18 height
+            safe_float(prod.get('depth')),           # 19 depth
+            skus[0] if skus and isinstance(skus[0], str) else None,  # 20 sku
+            safe_int(prod.get('stock')),             # 21 stock
+            safe_bool(prod.get('stock_management')), # 22 stock_management
+            safe_bool(prod.get('published')),        # 23 is_published
+            safe_bool(prod.get('requires_shipping')),# 24 requires_shipping
+            len(images),                             # 25 images_count
+            images[0].get('src') if images and isinstance(images[0], dict) else (safe_str(images[0]) if images else None),  # 26 thumbnail_url
+            prod.get('created_at'),                  # 27 created_at_api
+            prod.get('updated_at'),                  # 28 updated_at_api
+            now,                                     # 29 synced_at
         ))
 
     conn.commit()
