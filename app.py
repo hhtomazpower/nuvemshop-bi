@@ -4,9 +4,7 @@ import requests
 from datetime import datetime
 from flask import Flask, jsonify, request
 import psycopg2
-
 app = Flask(__name__)
-
 # 
 # CONFIG
 # 
@@ -17,17 +15,14 @@ DB_CONFIG = {
     'user': os.environ.get('DB_USER'),
     'password': os.environ.get('DB_PASSWORD'),
 }
-
 CLIENT_ID = os.environ.get('CLIENT_ID')
 CLIENT_SECRET = os.environ.get('CLIENT_SECRET')
 NUVEMSHOP_API_BASE = 'https://api.tiendanube.com/v1'
-
 # 
 # DB CONNECTION
 # 
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
-
 def get_active_store_token(store_id):
     """Busca o access_token da loja conectada."""
     conn = get_db_connection()
@@ -42,7 +37,6 @@ def get_active_store_token(store_id):
     if not result:
         raise ValueError(f"Loja {store_id} não encontrada ou inativa")
     return result[0]
-
 def make_api_headers(access_token):
     """Monta headers com o token real da loja."""
     return {
@@ -50,7 +44,6 @@ def make_api_headers(access_token):
         'User-Agent': 'modapower2-bi (contato@ontrade.com.br)',
         'Content-Type': 'application/json'
     }
-
 # 
 # SYNC: CATEGORIES (CORRIGIDO)
 # 
@@ -59,32 +52,33 @@ def sync_categories(store_id, access_token):
     url = f"{NUVEMSHOP_API_BASE}/{store_id}/categories"
     all_categories = []
     page = 1
-
+    per_page = 100
     while True:
-        params = {'page': page, 'per_page': 100}
+        params = {'page': page, 'per_page': per_page}
         resp = requests.get(url, headers=headers, params=params)
+        # 404 = não há mais páginas — parar sem erro
+        if resp.status_code == 404:
+            break
         if resp.status_code != 200:
             app.logger.error(f"Erro ao buscar categorias (página {page}): {resp.status_code} - {resp.text}")
             break
-
         data = resp.json()
         if not data:
             break
-
         all_categories.extend(data)
+        # Se veio menos que per_page, é a última página
+        if len(data) < per_page:
+            break
         page += 1
-
     conn = get_db_connection()
     cur = conn.cursor()
     now = datetime.now()
-
     for cat in all_categories:
         # Extrair campos multilíngues com segurança
         name_data = cat.get('name', {})
         name_pt = name_data.get('pt') if isinstance(name_data, dict) else str(name_data) if name_data else None
         name_es = name_data.get('es') if isinstance(name_data, dict) else None
         name_en = name_data.get('en') if isinstance(name_data, dict) else None
-
         desc_data = cat.get('description', {})
         if isinstance(desc_data, dict):
             description = desc_data.get('pt')
@@ -92,7 +86,6 @@ def sync_categories(store_id, access_token):
             description = str(desc_data)
         else:
             description = None
-
         handle_data = cat.get('handle', {})
         if isinstance(handle_data, dict):
             handle = handle_data.get('pt')
@@ -100,7 +93,6 @@ def sync_categories(store_id, access_token):
             handle = str(handle_data)
         else:
             handle = None
-
         cur.execute("""
             INSERT INTO categories (
                 store_id, nuvemshop_id, name_pt, name_es, name_en,
@@ -131,13 +123,11 @@ def sync_categories(store_id, access_token):
             cat.get('updated_at'),
             now
         ))
-
     cur.execute("UPDATE connected_stores SET last_synced_at = %s WHERE store_id = %s", (now, str(store_id)))
     conn.commit()
     cur.close()
     conn.close()
     return len(all_categories)
-
 # 
 # SYNC: PRODUCTS (CORRIGIDO v3 - CONTAGEM DE %s CORRIGIDA)
 # 
@@ -149,7 +139,6 @@ def safe_str(val):
     if isinstance(val, list):
         return json.dumps(val)
     return str(val)
-
 def safe_float(val, divide_by=1):
     if val is None:
         return 0
@@ -159,7 +148,6 @@ def safe_float(val, divide_by=1):
         return float(val) / divide_by
     except (ValueError, TypeError):
         return 0
-
 def safe_int(val):
     if val is None:
         return 0
@@ -169,7 +157,6 @@ def safe_int(val):
         return int(val)
     except (ValueError, TypeError):
         return 0
-
 def safe_bool(val):
     if val is None:
         return False
@@ -180,59 +167,53 @@ def safe_bool(val):
     if isinstance(val, str):
         return val.lower() in ('true', '1', 'yes')
     return bool(val)
-
 def sync_products(store_id, access_token):
     headers = make_api_headers(access_token)
     url = f"{NUVEMSHOP_API_BASE}/{store_id}/products"
     all_products = []
     page = 1
-
+    per_page = 100
     while True:
-        params = {'page': page, 'per_page': 100}
+        params = {'page': page, 'per_page': per_page}
         resp = requests.get(url, headers=headers, params=params)
+        # 404 = não há mais páginas — parar sem erro
+        if resp.status_code == 404:
+            break
         if resp.status_code != 200:
             app.logger.error(f"Erro ao buscar produtos (página {page}): {resp.status_code} - {resp.text}")
             break
-
         data = resp.json()
         if not data:
             break
-
         all_products.extend(data)
+        # Se veio menos que per_page, é a última página
+        if len(data) < per_page:
+            break
         page += 1
-
     conn = get_db_connection()
     cur = conn.cursor()
     now = datetime.now()
-
     for prod in all_products:
         name_data = prod.get('name', {})
         name_pt = name_data.get('pt') if isinstance(name_data, dict) else safe_str(name_data)
         name_es = name_data.get('es') if isinstance(name_data, dict) else None
         name_en = name_data.get('en') if isinstance(name_data, dict) else None
-
         desc_data = prod.get('description', {})
         description = desc_data.get('pt') if isinstance(desc_data, dict) else safe_str(desc_data)
-
         handle_data = prod.get('handle', {})
         slug = handle_data.get('pt') if isinstance(handle_data, dict) else safe_str(handle_data)
-
         images = prod.get('images', [])
         if not isinstance(images, list):
             images = []
-
         skus = prod.get('skus', [])
         if not isinstance(skus, list):
             skus = []
-
         categories = prod.get('categories', [])
         if not isinstance(categories, list):
             categories = []
-
         variants = prod.get('variants', [])
         if not isinstance(variants, list):
             variants = []
-
         # IMPORTANTE: 29 colunas = 29 %s
         cur.execute("""
             INSERT INTO products (
@@ -305,12 +286,10 @@ def sync_products(store_id, access_token):
             prod.get('updated_at'),                  # 28 updated_at_api
             now,                                     # 29 synced_at
         ))
-
     conn.commit()
     cur.close()
     conn.close()
     return len(all_products)
-
 # 
 # SYNC: PRODUCT VARIANTS
 # 
@@ -318,37 +297,28 @@ def sync_product_variants(store_id, access_token):
     """Sincroniza variantes de todos os produtos já cadastrados."""
     headers = make_api_headers(access_token)
     url_base = f"{NUVEMSHOP_API_BASE}/{store_id}/products"
-    
     conn = get_db_connection()
     cur = conn.cursor()
     now = datetime.now()
-    
     # Buscar todos os nuvemshop_id de produtos já sincronizados
     cur.execute("SELECT nuvemshop_id FROM products WHERE store_id = %s", (str(store_id),))
     product_ids = [row[0] for row in cur.fetchall()]
-    
     total_variants = 0
-    
     for prod_id in product_ids:
         # Buscar o produto completo na API (com variants)
         url = f"{url_base}/{prod_id}"
         resp = requests.get(url, headers=headers)
-        
         if resp.status_code != 200:
             app.logger.error(f"Erro ao buscar produto {prod_id}: {resp.status_code}")
             continue
-        
         prod_data = resp.json()
         variants = prod_data.get('variants', [])
-        
         if not isinstance(variants, list):
             variants = []
-        
         for variant in variants:
             variant_values = variant.get('values', [])
             if not isinstance(variant_values, list):
                 variant_values = []
-            
             # Extrair valores das variantes (tamanho, cor, etc)
             clean_values = []
             for val in variant_values:
@@ -360,11 +330,9 @@ def sync_product_variants(store_id, access_token):
                     })
                 else:
                     clean_values.append(str(val))
-            
             price = variant.get('price', 0) or 0
             compare_price = variant.get('compare_at_price', 0) or 0
             cost = variant.get('cost', 0) or 0
-            
             cur.execute("""
                 INSERT INTO product_variants (
                     store_id, product_id, nuvemshop_variant_id,
@@ -413,25 +381,21 @@ def sync_product_variants(store_id, access_token):
                 now
             ))
             total_variants += 1
-        
         # Atualizar o produto pai com preço/estoque agregados da primeira variante
         if variants:
             first_variant = variants[0]
             v_price = safe_float(first_variant.get('price', 0), 100)
             v_stock = sum(safe_int(v.get('stock', 0)) for v in variants if isinstance(v, dict))
             v_sku = safe_str(first_variant.get('sku')) if first_variant.get('sku') else None
-            
             cur.execute("""
                 UPDATE products 
                 SET price = %s, stock = %s, sku = %s
                 WHERE store_id = %s AND nuvemshop_id = %s
             """, (v_price, v_stock, v_sku, str(store_id), prod_id))
-    
     conn.commit()
     cur.close()
     conn.close()
     return total_variants
-
 # 
 # SYNC: CUSTOMERS
 # 
@@ -440,25 +404,27 @@ def sync_customers(store_id, access_token):
     url = f"{NUVEMSHOP_API_BASE}/{store_id}/customers"
     all_customers = []
     page = 1
-
+    per_page = 100
     while True:
-        params = {'page': page, 'per_page': 100}
+        params = {'page': page, 'per_page': per_page}
         resp = requests.get(url, headers=headers, params=params)
+        # 404 = não há mais páginas — parar sem erro
+        if resp.status_code == 404:
+            break
         if resp.status_code != 200:
             app.logger.error(f"Erro ao buscar clientes (página {page}): {resp.status_code} - {resp.text}")
             break
-
         data = resp.json()
         if not data:
             break
-
         all_customers.extend(data)
+        # Se veio menos que per_page, é a última página
+        if len(data) < per_page:
+            break
         page += 1
-
     conn = get_db_connection()
     cur = conn.cursor()
     now = datetime.now()
-
     for cust in all_customers:
         ident = cust.get('identification', {})
         cur.execute("""
@@ -498,12 +464,10 @@ def sync_customers(store_id, access_token):
             cust.get('updated_at'),
             now
         ))
-
     conn.commit()
     cur.close()
     conn.close()
     return len(all_customers)
-
 # 
 # SYNC: ORDERS + ORDER_ITEMS
 # 
@@ -512,29 +476,30 @@ def sync_orders(store_id, access_token):
     url = f"{NUVEMSHOP_API_BASE}/{store_id}/orders"
     all_orders = []
     page = 1
-
+    per_page = 50
     while True:
-        params = {'page': page, 'per_page': 50}
+        params = {'page': page, 'per_page': per_page}
         resp = requests.get(url, headers=headers, params=params)
+        # 404 = não há mais páginas — parar sem erro
+        if resp.status_code == 404:
+            break
         if resp.status_code != 200:
             app.logger.error(f"Erro ao buscar pedidos (página {page}): {resp.status_code} - {resp.text}")
             break
-
         data = resp.json()
         if not data:
             break
-
         all_orders.extend(data)
+        # Se veio menos que per_page, é a última página
+        if len(data) < per_page:
+            break
         page += 1
-
     conn = get_db_connection()
     cur = conn.cursor()
     now = datetime.now()
-
     for ord_data in all_orders:
         customer = ord_data.get('customer', {}) if isinstance(ord_data.get('customer'), dict) else {}
         payment = ord_data.get('payment_method', {})
-
         cur.execute("""
             INSERT INTO orders (
                 store_id, nuvemshop_id, order_number, status,
@@ -592,9 +557,7 @@ def sync_orders(store_id, access_token):
             ord_data.get('updated_at'),
             now
         ))
-
         order_db_id = cur.fetchone()[0]
-
         for item in ord_data.get('products', []):
             item_name = item.get('name', {})
             item_price = item.get('price', 0) or 0
@@ -625,12 +588,10 @@ def sync_orders(store_id, access_token):
                 item.get('weight_unit', 'g'),
                 now
             ))
-
     conn.commit()
     cur.close()
     conn.close()
     return len(all_orders)
-
 # ENDPOINT: SYNC ALL (atualizado)
 @app.route('/api/sync/<store_id>', methods=['POST'])
 def sync_all(store_id):
@@ -638,47 +599,39 @@ def sync_all(store_id):
         access_token = get_active_store_token(store_id)
     except ValueError as e:
         return jsonify({'error': str(e)}), 404
-
     results = {}
     errors = []
-
     try:
         results['categories'] = sync_categories(store_id, access_token)
     except Exception as e:
         errors.append(f'categories: {str(e)}')
         results['categories'] = 0
-
     try:
         results['products'] = sync_products(store_id, access_token)
     except Exception as e:
         errors.append(f'products: {str(e)}')
         results['products'] = 0
-
     try:
         results['product_variants'] = sync_product_variants(store_id, access_token)
     except Exception as e:
         errors.append(f'product_variants: {str(e)}')
         results['product_variants'] = 0
-
     try:
         results['customers'] = sync_customers(store_id, access_token)
     except Exception as e:
         errors.append(f'customers: {str(e)}')
         results['customers'] = 0
-
     try:
         results['orders'] = sync_orders(store_id, access_token)
     except Exception as e:
         errors.append(f'orders: {str(e)}')
         results['orders'] = 0
-
     return jsonify({
         'store_id': store_id,
         'synced': results,
         'errors': errors,
         'timestamp': datetime.now().isoformat()
     })
-
 # ENDPOINT: SYNC por entidade (atualizado)
 @app.route('/api/sync/<store_id>/<entity>', methods=['POST'])
 def sync_entity(store_id, entity):
@@ -686,7 +639,6 @@ def sync_entity(store_id, entity):
         access_token = get_active_store_token(store_id)
     except ValueError as e:
         return jsonify({'error': str(e)}), 404
-
     sync_map = {
         'categories': sync_categories,
         'products': sync_products,
@@ -694,10 +646,8 @@ def sync_entity(store_id, entity):
         'customers': sync_customers,
         'orders': sync_orders
     }
-
     if entity not in sync_map:
         return jsonify({'error': f'Entidade inválida. Use: {list(sync_map.keys())}'}), 400
-
     try:
         count = sync_map[entity](store_id, access_token)
         return jsonify({
@@ -722,7 +672,6 @@ def health_check():
         return jsonify({'db': 'connected', 'status': 'ok'})
     except Exception as e:
         return jsonify({'db': 'error', 'status': 'fail', 'error': str(e)}), 500
-
 # 
 # DASHBOARD: Métricas
 # 
@@ -731,28 +680,20 @@ def dashboard(store_id):
     conn = get_db_connection()
     cur = conn.cursor()
     metrics = {}
-
     cur.execute("SELECT COUNT(*) FROM products WHERE store_id = %s", (str(store_id),))
     metrics['total_products'] = cur.fetchone()[0]
-
     cur.execute("SELECT COUNT(*) FROM orders WHERE store_id = %s", (str(store_id),))
     metrics['total_orders'] = cur.fetchone()[0]
-
     cur.execute("SELECT COUNT(*) FROM customers WHERE store_id = %s", (str(store_id),))
     metrics['total_customers'] = cur.fetchone()[0]
-
     cur.execute("SELECT COALESCE(SUM(total), 0) FROM orders WHERE store_id = %s AND status != 'cancelled'", (str(store_id),))
     metrics['total_revenue'] = float(cur.fetchone()[0])
-
     cur.execute("SELECT COALESCE(AVG(total), 0) FROM orders WHERE store_id = %s AND status != 'cancelled'", (str(store_id),))
     metrics['avg_order_value'] = float(cur.fetchone()[0])
-
     cur.execute("SELECT COUNT(*) FROM order_items WHERE store_id = %s", (str(store_id),))
     metrics['total_items_sold'] = cur.fetchone()[0]
-
     cur.close()
     conn.close()
     return jsonify({'store_id': store_id, 'metrics': metrics})
-
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
