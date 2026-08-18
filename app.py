@@ -52,7 +52,7 @@ def make_api_headers(access_token):
     }
 
 # 
-# SYNC: CATEGORIES
+# SYNC: CATEGORIES (CORRIGIDO)
 # 
 def sync_categories(store_id, access_token):
     headers = make_api_headers(access_token)
@@ -79,8 +79,28 @@ def sync_categories(store_id, access_token):
     now = datetime.now()
 
     for cat in all_categories:
+        # Extrair campos multilíngues com segurança
         name_data = cat.get('name', {})
+        name_pt = name_data.get('pt') if isinstance(name_data, dict) else str(name_data) if name_data else None
+        name_es = name_data.get('es') if isinstance(name_data, dict) else None
+        name_en = name_data.get('en') if isinstance(name_data, dict) else None
+
         desc_data = cat.get('description', {})
+        if isinstance(desc_data, dict):
+            description = desc_data.get('pt')
+        elif desc_data:
+            description = str(desc_data)
+        else:
+            description = None
+
+        handle_data = cat.get('handle', {})
+        if isinstance(handle_data, dict):
+            handle = handle_data.get('pt')
+        elif handle_data:
+            handle = str(handle_data)
+        else:
+            handle = None
+
         cur.execute("""
             INSERT INTO categories (
                 store_id, nuvemshop_id, name_pt, name_es, name_en,
@@ -94,18 +114,16 @@ def sync_categories(store_id, access_token):
                 name_en = EXCLUDED.name_en,
                 parent_category_id = EXCLUDED.parent_category_id,
                 description = EXCLUDED.description,
+                handle = EXCLUDED.handle,
                 is_visible = EXCLUDED.is_visible,
                 product_count = EXCLUDED.product_count,
                 updated_at_api = EXCLUDED.updated_at_api,
                 synced_at = EXCLUDED.synced_at
         """, (
             str(store_id), cat.get('id'),
-            name_data.get('pt') if isinstance(name_data, dict) else str(name_data),
-            name_data.get('es') if isinstance(name_data, dict) else None,
-            name_data.get('en') if isinstance(name_data, dict) else None,
+            name_pt, name_es, name_en,
             cat.get('parent_category_id'),
-            desc_data.get('pt') if isinstance(desc_data, dict) else str(desc_data) if desc_data else None,
-            cat.get('handle'),
+            description, handle,
             cat.get('visible', True),
             cat.get('product_count', 0),
             cat.get('subcategories_count', 0),
@@ -121,7 +139,7 @@ def sync_categories(store_id, access_token):
     return len(all_categories)
 
 # 
-# SYNC: PRODUCTS
+# SYNC: PRODUCTS (CORRIGIDO)
 # 
 def sync_products(store_id, access_token):
     headers = make_api_headers(access_token)
@@ -148,8 +166,28 @@ def sync_products(store_id, access_token):
     now = datetime.now()
 
     for prod in all_products:
+        # Extrair campos multilíngues com segurança
         name_data = prod.get('name', {})
+        name_pt = name_data.get('pt') if isinstance(name_data, dict) else str(name_data) if name_data else None
+        name_es = name_data.get('es') if isinstance(name_data, dict) else None
+        name_en = name_data.get('en') if isinstance(name_data, dict) else None
+
         desc_data = prod.get('description', {})
+        if isinstance(desc_data, dict):
+            description = desc_data.get('pt')
+        elif desc_data:
+            description = str(desc_data)
+        else:
+            description = None
+
+        handle_data = prod.get('handle', {})
+        if isinstance(handle_data, dict):
+            slug = handle_data.get('pt')
+        elif handle_data:
+            slug = str(handle_data)
+        else:
+            slug = None
+
         price_data = prod.get('price', 0) or 0
         compare_price = prod.get('compare_at_price', 0) or 0
         cost_price = prod.get('cost', 0) or 0
@@ -188,11 +226,8 @@ def sync_products(store_id, access_token):
                 synced_at = EXCLUDED.synced_at
         """, (
             str(store_id), prod.get('id'),
-            name_data.get('pt') if isinstance(name_data, dict) else str(name_data),
-            name_data.get('es') if isinstance(name_data, dict) else None,
-            name_data.get('en') if isinstance(name_data, dict) else None,
-            prod.get('handle', {}).get('pt') if isinstance(prod.get('handle'), dict) else prod.get('handle'),
-            desc_data.get('pt') if isinstance(desc_data, dict) else (str(desc_data) if desc_data else None),
+            name_pt, name_es, name_en,
+            slug, description,
             prod.get('brand'),
             len(prod.get('variants', [])),
             categories[0] if categories else None,
@@ -221,7 +256,6 @@ def sync_products(store_id, access_token):
     cur.close()
     conn.close()
     return len(all_products)
-
 # 
 # SYNC: CUSTOMERS
 # 
