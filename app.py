@@ -139,8 +139,52 @@ def sync_categories(store_id, access_token):
     return len(all_categories)
 
 # 
-# SYNC: PRODUCTS (CORRIGIDO)
+# SYNC: PRODUCTS (CORRIGIDO v2 - SANITIZAÇÃO COMPLETA)
 # 
+def safe_str(val):
+    """Converte qualquer valor para string segura. Se for dict, extrai 'pt' ou converte para JSON."""
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val.get('pt') or val.get('es') or val.get('en') or json.dumps(val)
+    if isinstance(val, list):
+        return json.dumps(val)
+    return str(val)
+
+def safe_float(val, divide_by=1):
+    """Converte para float com segurança. Se for dict/list, extrai valor ou retorna 0."""
+    if val is None:
+        return 0
+    if isinstance(val, (dict, list)):
+        return 0
+    try:
+        return float(val) / divide_by
+    except (ValueError, TypeError):
+        return 0
+
+def safe_int(val):
+    """Converte para int com segurança."""
+    if val is None:
+        return 0
+    if isinstance(val, (dict, list)):
+        return 0
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return 0
+
+def safe_bool(val):
+    """Converte para bool com segurança."""
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (dict, list)):
+        return False
+    if isinstance(val, str):
+        return val.lower() in ('true', '1', 'yes')
+    return bool(val)
+
 def sync_products(store_id, access_token):
     headers = make_api_headers(access_token)
     url = f"{NUVEMSHOP_API_BASE}/{store_id}/products"
@@ -166,34 +210,34 @@ def sync_products(store_id, access_token):
     now = datetime.now()
 
     for prod in all_products:
-        # Extrair campos multilíngues com segurança
+        # Extrair campos multilíngues
         name_data = prod.get('name', {})
-        name_pt = name_data.get('pt') if isinstance(name_data, dict) else str(name_data) if name_data else None
+        name_pt = name_data.get('pt') if isinstance(name_data, dict) else safe_str(name_data)
         name_es = name_data.get('es') if isinstance(name_data, dict) else None
         name_en = name_data.get('en') if isinstance(name_data, dict) else None
 
         desc_data = prod.get('description', {})
-        if isinstance(desc_data, dict):
-            description = desc_data.get('pt')
-        elif desc_data:
-            description = str(desc_data)
-        else:
-            description = None
+        description = desc_data.get('pt') if isinstance(desc_data, dict) else safe_str(desc_data)
 
         handle_data = prod.get('handle', {})
-        if isinstance(handle_data, dict):
-            slug = handle_data.get('pt')
-        elif handle_data:
-            slug = str(handle_data)
-        else:
-            slug = None
+        slug = handle_data.get('pt') if isinstance(handle_data, dict) else safe_str(handle_data)
 
-        price_data = prod.get('price', 0) or 0
-        compare_price = prod.get('compare_at_price', 0) or 0
-        cost_price = prod.get('cost', 0) or 0
+        # Campos que podem vir como dict inesperadamente
         images = prod.get('images', [])
+        if not isinstance(images, list):
+            images = []
+
         skus = prod.get('skus', [])
+        if not isinstance(skus, list):
+            skus = []
+
         categories = prod.get('categories', [])
+        if not isinstance(categories, list):
+            categories = []
+
+        variants = prod.get('variants', [])
+        if not isinstance(variants, list):
+            variants = []
 
         cur.execute("""
             INSERT INTO products (
@@ -225,28 +269,30 @@ def sync_products(store_id, access_token):
                 updated_at_api = EXCLUDED.updated_at_api,
                 synced_at = EXCLUDED.synced_at
         """, (
-            str(store_id), prod.get('id'),
+            str(store_id),
+            safe_int(prod.get('id')),
             name_pt, name_es, name_en,
-            slug, description,
-            prod.get('brand'),
-            len(prod.get('variants', [])),
-            categories[0] if categories else None,
+            slug,
+            description,
+            safe_str(prod.get('brand')),
+            len(variants),
+            categories[0] if categories and isinstance(categories[0], (int, float)) else None,
             None,
-            float(price_data) / 100 if price_data else 0,
-            float(compare_price) / 100 if compare_price else 0,
-            float(cost_price) / 100 if cost_price else 0,
-            prod.get('weight', 0),
-            prod.get('weight_unit', 'g'),
-            prod.get('width', 0),
-            prod.get('height', 0),
-            prod.get('depth', 0),
-            skus[0] if skus else None,
-            prod.get('stock', 0),
-            prod.get('stock_management', False),
-            prod.get('published', True),
-            prod.get('requires_shipping', True),
+            safe_float(prod.get('price'), 100),
+            safe_float(prod.get('compare_at_price'), 100),
+            safe_float(prod.get('cost'), 100),
+            safe_float(prod.get('weight')),
+            safe_str(prod.get('weight_unit', 'g')),
+            safe_float(prod.get('width')),
+            safe_float(prod.get('height')),
+            safe_float(prod.get('depth')),
+            skus[0] if skus and isinstance(skus[0], str) else None,
+            safe_int(prod.get('stock')),
+            safe_bool(prod.get('stock_management')),
+            safe_bool(prod.get('published')),
+            safe_bool(prod.get('requires_shipping')),
             len(images),
-            images[0].get('src') if images else None,
+            images[0].get('src') if images and isinstance(images[0], dict) else (safe_str(images[0]) if images else None),
             prod.get('created_at'),
             prod.get('updated_at'),
             now
