@@ -631,12 +631,9 @@ def sync_orders(store_id, access_token):
     conn.close()
     return len(all_orders)
 
-# 
-# ENDPOINT: SYNC ALL
-# 
+# ENDPOINT: SYNC ALL (atualizado)
 @app.route('/api/sync/<store_id>', methods=['POST'])
 def sync_all(store_id):
-    """Sincroniza todos os dados da loja: categorias, produtos, clientes, pedidos."""
     try:
         access_token = get_active_store_token(store_id)
     except ValueError as e:
@@ -658,6 +655,12 @@ def sync_all(store_id):
         results['products'] = 0
 
     try:
+        results['product_variants'] = sync_product_variants(store_id, access_token)
+    except Exception as e:
+        errors.append(f'product_variants: {str(e)}')
+        results['product_variants'] = 0
+
+    try:
         results['customers'] = sync_customers(store_id, access_token)
     except Exception as e:
         errors.append(f'customers: {str(e)}')
@@ -676,9 +679,7 @@ def sync_all(store_id):
         'timestamp': datetime.now().isoformat()
     })
 
-# 
-# ENDPOINT: SYNC por entidade
-# 
+# ENDPOINT: SYNC por entidade (atualizado)
 @app.route('/api/sync/<store_id>/<entity>', methods=['POST'])
 def sync_entity(store_id, entity):
     try:
@@ -689,6 +690,7 @@ def sync_entity(store_id, entity):
     sync_map = {
         'categories': sync_categories,
         'products': sync_products,
+        'product_variants': sync_product_variants,
         'customers': sync_customers,
         'orders': sync_orders
     }
@@ -706,7 +708,6 @@ def sync_entity(store_id, entity):
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 # 
 # HEALTH CHECK
 # 
