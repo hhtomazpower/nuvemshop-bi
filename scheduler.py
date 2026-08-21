@@ -1,10 +1,8 @@
 import logging
 import os
 from datetime import datetime, timezone
-
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-
 from app import app, get_db_connection
 
 logging.basicConfig(level=logging.INFO)
@@ -49,9 +47,11 @@ def run_sync_all():
         return
 
     client = app.test_client()
+
     for store_id in store_ids:
         started_at = datetime.now(timezone.utc)
         logger.info("Iniciando sync da loja %s", store_id)
+
         try:
             resp = client.post(f"/api/sync/{store_id}")
             finished_at = datetime.now(timezone.utc)
@@ -60,16 +60,37 @@ def run_sync_all():
             if resp.status_code == 200:
                 synced = payload.get("synced", {})
                 errors = payload.get("errors", [])
+
                 for entity, count in synced.items():
-                    status = "error" if any(entity in e for e in errors) else "success"
+                    # CORREÇÃO 1: extrair a mensagem de erro específica da entidade
+                    entity_error = None
+                    status = "success"
+                    for err in errors:
+                        if entity in err:
+                            status = "error"
+                            entity_error = err  # ex: "orders: KeyError: 'payment_method'"
+                            break
+
                     log_sync(store_id, entity, status, count, count,
+                             error_message=entity_error,
                              started_at=started_at, finished_at=finished_at)
-                logger.info("Sync OK loja %s: %s", store_id, synced)
+
+                # CORREÇÃO 2: logar erros no console (antes só logava "Sync OK")
+                if errors:
+                    logger.warning(
+                        "Sync concluído com ERROS loja %s: %s | erros: %s",
+                        store_id, synced, errors
+                    )
+                else:
+                    logger.info("Sync OK loja %s: %s", store_id, synced)
             else:
+                # Resposta não-200 — erro geral
+                error_msg = str(payload.get("error", resp.status_code))
                 log_sync(store_id, "all", "error", 0, 0,
-                         error_message=str(payload.get("error", resp.status_code)),
+                         error_message=error_msg,
                          started_at=started_at, finished_at=finished_at)
-                logger.error("Falha no sync da loja %s: %s", store_id, payload)
+                logger.error("Falha no sync da loja %s: %s", store_id, error_msg)
+
         except Exception as e:
             finished_at = datetime.now(timezone.utc)
             log_sync(store_id, "all", "error", 0, 0, error_message=str(e),
@@ -83,8 +104,8 @@ def main():
         IntervalTrigger(minutes=SYNC_INTERVAL_MINUTES),
         id="sync_all_stores",
         replace_existing=True,
-        max_instances=1,   # impede execuções sobrepostas
-        coalesce=True,     # se atrasar, roda só uma vez
+        max_instances=1,
+        coalesce=True,
         misfire_grace_time=3600,
     )
     logger.info("Scheduler iniciado — intervalo de %s min", SYNC_INTERVAL_MINUTES)
